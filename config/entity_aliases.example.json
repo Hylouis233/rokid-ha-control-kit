@@ -1,0 +1,17 @@
+[
+  {
+    "entity_id": "light.living_room",
+    "domain": "light",
+    "aliases": ["客厅灯", "客厅的灯", "大厅灯"]
+  },
+  {
+    "entity_id": "switch.air_purifier",
+    "domain": "switch",
+    "aliases": ["空气净化器", "净化器"]
+  },
+  {
+    "entity_id": "climate.bedroom_ac",
+    "domain": "climate",
+    "aliases": ["卧室空调", "房间空调"]
+  }
+]
