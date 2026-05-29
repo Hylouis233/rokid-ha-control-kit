@@ -100,13 +100,22 @@ curl -X POST http://127.0.0.1:8080/service-call \
   -d '{"domain":"light","service":"turn_on","service_data":{"entity_id":"light.living_room"}}'
 ```
 
-灵珠 SSE 测试：
+灵珠 SSE 测试（简化格式）：
 
 ```bash
 curl -N -X POST http://127.0.0.1:8080/rokid/sse \
   -H 'Authorization: Bearer replace-with-rokid-auth-ak' \
   -H 'Content-Type: application/json' \
   -d '{"text":"打开客厅灯","sessionId":"debug"}'
+```
+
+灵珠 SSE 测试（Lingzhu 格式）：
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/rokid/sse \
+  -H 'Authorization: Bearer replace-with-rokid-auth-ak' \
+  -H 'Content-Type: application/json' \
+  -d '{"message_id":"msg-001","agent_id":"rokid-ha-control-kit","message":[{"role":"user","type":"text","text":"打开客厅灯"}]}'
 ```
 
 ## 实体别名
@@ -149,6 +158,43 @@ curl -N -X POST http://127.0.0.1:8080/rokid/sse \
 3. Auth AK 填写与 `ROKID_AUTH_AK` 相同的值。
 4. 输入字段建议使用文本输入；服务端兼容 `text`、`content`、`query`、`input`。
 5. 真实设备联调前，先用 `curl` 验证 `/health` 和 `/rokid/sse`。
+
+## 灵珠平台 Lingzhu 协议支持
+
+服务端已完整支持灵珠平台 Lingzhu 协议格式，包括：
+
+- **请求格式**：自动识别灵珠平台的 `message` 数组格式，从 `role=user`、`type=text` 的消息中提取用户输入。
+- **响应格式**：返回灵珠平台期望的 Lingzhu SSE 格式，包含 `role`、`type`、`answer_stream`、`message_id`、`agent_id`、`is_finish` 字段。
+- **兼容性**：同时支持简化格式（`text`、`content`、`query`、`input`）和灵珠平台 Lingzhu 格式。
+
+### Lingzhu 请求示例
+
+```json
+{
+  "message_id": "msg-001",
+  "agent_id": "rokid-ha-control-kit",
+  "message": [
+    {
+      "role": "user",
+      "type": "text",
+      "text": "打开客厅灯"
+    }
+  ]
+}
+```
+
+### Lingzhu 响应示例
+
+```text
+event: message
+data: {"role":"agent","type":"answer","answer_stream":"正在处理 Home Assistant 指令...","message_id":"msg-001","agent_id":"rokid-ha-control-kit","is_finish":false}
+
+event: message
+data: {"role":"agent","type":"answer","answer_stream":"已打开客厅灯","message_id":"msg-001","agent_id":"rokid-ha-control-kit","is_finish":true}
+
+event: done
+data: "[DONE]"
+```
 
 ## 反向代理示例
 
