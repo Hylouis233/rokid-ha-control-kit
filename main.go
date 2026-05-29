@@ -66,6 +66,32 @@ type RokidRequest struct {
 	ConfirmToken string `json:"confirm_token"`
 }
 
+// LingzhuMessage 灵珠平台消息格式
+type LingzhuMessage struct {
+	Role     string `json:"role"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	ImageURL string `json:"image_url,omitempty"`
+}
+
+// LingzhuRequest 灵珠平台请求格式
+type LingzhuRequest struct {
+	MessageID string          `json:"message_id"`
+	AgentID   string          `json:"agent_id"`
+	Message   []LingzhuMessage `json:"message"`
+	UserID    string          `json:"user_id,omitempty"`
+}
+
+// LingzhuSSEData 灵珠平台 SSE 响应格式
+type LingzhuSSEData struct {
+	Role         string `json:"role"`
+	Type         string `json:"type"`
+	AnswerStream string `json:"answer_stream,omitempty"`
+	MessageID    string `json:"message_id"`
+	AgentID      string `json:"agent_id"`
+	IsFinish     bool   `json:"is_finish"`
+}
+
 type AuditEvent struct {
 	Time     string `json:"time"`
 	Remote   string `json:"remote"`
@@ -207,14 +233,70 @@ func (s *Server) rokidSSE(w http.ResponseWriter, r *http.Request) {
 		writeSSE(w, "error", map[string]string{"error": err.Error()})
 		return
 	}
-	writeSSE(w, "message", map[string]string{"content": "正在处理 Home Assistant 指令..."})
+
+	// 提取灵珠平台请求信息
+	var messageID, agentID string
+	var isLingzhu bool
+
+	// 重新读取请求体以获取 Lingzhu 信息
+	bodyBytes, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	var lingzhuReq LingzhuRequest
+	if err := json.Unmarshal(bodyBytes, &lingzhuReq); err == nil && lingzhuReq.MessageID != "" {
+		messageID = lingzhuReq.MessageID
+		agentID = lingzhuReq.AgentID
+		isLingzhu = true
+	}
+
+	// 发送处理中状态
+	if isLingzhu {
+		writeLingzhuSSE(w, "message", LingzhuSSEData{
+			Role:        "agent",
+			Type:        "answer",
+			AnswerStream: "正在处理 Home Assistant 指令...",
+			MessageID:   messageID,
+			AgentID:     agentID,
+			IsFinish:    false,
+		})
+	} else {
+		writeSSE(w, "message", map[string]string{"content": "正在处理 Home Assistant 指令..."})
+	}
+
 	result, _, err := s.handleIntent(r.Context(), r, text, req.ConfirmToken)
 	if err != nil {
-		writeSSE(w, "error", map[string]string{"error": err.Error()})
+		if isLingzhu {
+			writeLingzhuSSE(w, "message", LingzhuSSEData{
+				Role:        "agent",
+				Type:        "answer",
+				AnswerStream: fmt.Sprintf("[错误] %s", err.Error()),
+				MessageID:   messageID,
+				AgentID:     agentID,
+				IsFinish:    true,
+			})
+			writeLingzhuSSE(w, "done", "[DONE]")
+		} else {
+			writeSSE(w, "error", map[string]string{"error": err.Error()})
+		}
 		return
 	}
-	writeSSE(w, "message", map[string]string{"content": summarizeResult(result)})
-	writeSSE(w, "done", map[string]bool{"ok": true})
+
+	// 发送结果
+	if isLingzhu {
+		writeLingzhuSSE(w, "message", LingzhuSSEData{
+			Role:        "agent",
+			Type:        "answer",
+			AnswerStream: summarizeResult(result),
+			MessageID:   messageID,
+			AgentID:     agentID,
+			IsFinish:    true,
+		})
+		writeLingzhuSSE(w, "done", "[DONE]")
+	} else {
+		writeSSE(w, "message", map[string]string{"content": summarizeResult(result)})
+		writeSSE(w, "done", map[string]bool{"ok": true})
+	}
 }
 
 func (s *Server) handleIntent(ctx context.Context, r *http.Request, text, confirmToken string) ([]byte, int, error) {
@@ -381,7 +463,32 @@ func extractText(r *http.Request) (string, error) {
 }
 
 func extractRokidRequest(r *http.Request) (RokidRequest, string, error) {
+	// 先读取请求体，支持多次解析
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return RokidRequest{}, "", err
+	}
+	r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// 尝试解析为灵珠平台 Lingzhu 格式
+	var lingzhuReq LingzhuRequest
+	if err := json.Unmarshal(bodyBytes, &lingzhuReq); err == nil && len(lingzhuReq.Message) > 0 {
+		// 从 Lingzhu 消息数组中提取文本
+		for _, msg := range lingzhuReq.Message {
+			if msg.Role == "user" && msg.Type == "text" && strings.TrimSpace(msg.Text) != "" {
+				req := RokidRequest{
+					Text:      strings.TrimSpace(msg.Text),
+					SessionID: lingzhuReq.MessageID,
+				}
+				return req, req.Text, nil
+			}
+		}
+	}
+
+	// 回退到简化格式
 	var req RokidRequest
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	if err := decodeJSON(r, &req); err != nil {
 		return req, "", err
 	}
@@ -422,14 +529,42 @@ func writeSSE(w http.ResponseWriter, event string, payload interface{}) {
 	}
 }
 
+func writeLingzhuSSE(w http.ResponseWriter, event string, data interface{}) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	jsonData, _ := json.Marshal(data)
+	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
 func summarizeResult(data []byte) string {
 	if len(data) == 0 || string(data) == "null" {
 		return "操作已发送到 Home Assistant。"
 	}
-	if len(data) > 500 {
-		return "操作已完成，Home Assistant 返回了较长结果。"
+
+	// 尝试解析 Home Assistant 对话响应
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err == nil {
+		// 提取 speech 内容
+		if response, ok := result["response"].(map[string]interface{}); ok {
+			if speech, ok := response["speech"].(map[string]interface{}); ok {
+				if plain, ok := speech["plain"].(map[string]interface{}); ok {
+					if text, ok := plain["speech"].(string); ok {
+						return text
+					}
+				}
+			}
+		}
 	}
-	return "Home Assistant 返回：" + string(data)
+
+	// 如果解析失败或不是对话响应，返回简化信息
+	if len(data) > 200 {
+		return "操作已完成。"
+	}
+	return string(data)
 }
 
 func containsAny(text string, words ...string) bool {
