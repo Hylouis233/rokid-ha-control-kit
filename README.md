@@ -69,18 +69,205 @@ curl http://127.0.0.1:8080/health
 | `CONFIRM_TOKEN` | 空 | 高风险 domain 二次确认 token |
 | `AUDIT_LOG_FILE` | 空 | 请求审计日志路径；为空时不写审计日志 |
 
-## Docker
+## 自部署指南
+
+### 为什么自部署？
+
+- **隐私安全**：Home Assistant token 和设备配置完全由你自己控制
+- **网络隔离**：服务运行在你的本地网络，无需暴露 HA 到公网
+- **定制化**：可以根据需求修改代码和配置
+- **无依赖**：不依赖第三方云服务
+
+### 部署方式
+
+#### 1. 直接运行（适合开发测试）
 
 ```bash
-docker build -t rokid-ha-control-kit .
-docker run --rm -p 8080:8080 \
-  -e HA_URL="http://homeassistant.local:8123" \
-  -e HA_TOKEN="replace-with-home-assistant-token" \
-  -e ROKID_AUTH_AK="replace-with-rokid-auth-ak" \
-  rokid-ha-control-kit
+# 克隆仓库
+git clone https://github.com/Hylouis233/rokid-ha-control-kit.git
+cd rokid-ha-control-kit
+
+# 复制配置文件
+cp .env.example .env
+
+# 编辑配置
+# HA_URL: 你的 Home Assistant 地址
+# HA_TOKEN: 你的 Home Assistant Long-Lived Access Token
+# ROKID_AUTH_AK: 生成一个随机密钥
+
+# 运行
+go run .
 ```
 
-也可以复制 `docker-compose.example.yml` 后按实际环境修改。
+#### 2. Docker 部署（推荐生产环境）
+
+```bash
+# 克隆仓库
+git clone https://github.com/Hylouis233/rokid-ha-control-kit.git
+cd rokid-ha-control-kit
+
+# 复制并编辑 docker-compose 配置
+cp docker-compose.example.yml docker-compose.yml
+# 编辑 docker-compose.yml 中的配置
+
+# 构建并启动
+docker-compose up -d
+```
+
+#### 3. Home Assistant Add-on（最简单）
+
+如果你使用 Home Assistant OS 或 Supervised，可以安装 Add-on：
+
+1. 在 HA 中打开 "Add-on Store"
+2. 添加自定义仓库：`https://github.com/Hylouis233/rokid-ha-control-kit`
+3. 安装 "Rokid HA Control Kit" Add-on
+4. 配置并启动
+
+### 公网暴露方案
+
+由于灵珠平台需要 HTTPS 回调地址，你需要将服务暴露到公网。以下是几种方案：
+
+#### 方案一：Tailscale Funnel（推荐，最简单）
+
+Tailscale Funnel 可以将本地服务暴露到公网，无需配置域名和证书。
+
+```bash
+# 1. 安装 Tailscale
+# Windows: https://tailscale.com/download/windows
+# macOS: brew install tailscale
+# Linux: curl -fsSL https://tailscale.com/install.sh | sh
+
+# 2. 登录 Tailscale
+tailscale login
+
+# 3. 开启 Funnel（将本地 8080 端口暴露到公网）
+tailscale funnel --bg 8080
+
+# 4. 获取公网 URL
+tailscale funnel status
+# 会显示类似: https://your-machine.tail12345.ts.net
+```
+
+然后在灵珠平台配置：
+- SSE URL: `https://your-machine.tail12345.ts.net/rokid/sse`
+- Auth AK: 你配置的 `ROKID_AUTH_AK`
+
+#### 方案二：Cloudflare Tunnel（免费，稳定）
+
+Cloudflare Tunnel 提供免费的公网暴露，支持自定义域名。
+
+```bash
+# 1. 安装 cloudflared
+# Windows: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+# macOS: brew install cloudflare/cloudflare/cloudflared
+# Linux: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
+
+# 2. 登录
+cloudflared tunnel login
+
+# 3. 创建隧道
+cloudflared tunnel create rokid-ha-control-kit
+
+# 4. 配置路由
+cloudflared tunnel route dns rokid-ha-control-kit rokid.yourdomain.com
+
+# 5. 运行隧道
+cloudflared tunnel run rokid-ha-control-kit
+```
+
+#### 方案三：反向代理 + 动态 DNS
+
+如果你有公网 IP 或使用动态 DNS 服务：
+
+```nginx
+# Nginx 配置示例
+server {
+    listen 443 ssl;
+    server_name rokid.yourdomain.com;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    location /rokid/sse {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_read_timeout 86400;
+    }
+}
+```
+
+### 配置示例
+
+#### 完整配置示例
+
+```env
+# 服务端口
+PORT=8080
+
+# Home Assistant 配置
+HA_URL=http://192.168.1.100:8123
+HA_TOKEN=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...
+
+# 灵珠平台 Auth AK（建议使用随机生成的密钥）
+ROKID_AUTH_AK=your-random-secret-key-here
+
+# 实体别名配置
+ENTITY_ALIASES_FILE=config/entity_aliases.json
+
+# 允许控制的实体（逗号分隔，为空则不限制）
+ALLOWED_ENTITIES=light.living_room,light.bedroom,switch.air_purifier,climate.living_room
+
+# 允许调用的 service（逗号分隔）
+ALLOWED_SERVICES=light.turn_on,light.turn_off,switch.turn_on,switch.turn_off,climate.set_temperature
+
+# 高风险操作确认 token
+CONFIRM_TOKEN=your-confirm-token
+
+# 审计日志路径
+AUDIT_LOG_FILE=logs/audit.log
+```
+
+#### 生成随机 AK
+
+```bash
+# Linux/macOS
+openssl rand -hex 32
+
+# Windows PowerShell
+-join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+
+# 或使用在线工具: https://randomkeygen.com/
+```
+
+#### 实体别名配置示例
+
+```json
+[
+  {
+    "entity_id": "light.living_room",
+    "domain": "light",
+    "aliases": ["客厅灯", "大厅灯", "客厅的灯"]
+  },
+  {
+    "entity_id": "light.bedroom",
+    "domain": "light",
+    "aliases": ["卧室灯", "房间灯", "卧室的灯"]
+  },
+  {
+    "entity_id": "switch.air_purifier",
+    "domain": "switch",
+    "aliases": ["空气净化器", "净化器", "空气清新器"]
+  },
+  {
+    "entity_id": "climate.living_room",
+    "domain": "climate",
+    "aliases": ["客厅空调", "空调", "客厅的空调"]
+  }
+]
+```
 
 ## 请求示例
 
